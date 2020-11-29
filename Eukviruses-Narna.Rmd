@@ -1,0 +1,411 @@
+---
+title: "RNA viruses -Narnaviridae"
+date: "February 26, 2019"
+author: "Erin Nuccio with input from Evan Starr"
+output: html_document
+---
+
+
+Load libraries and set working directory
+```{r}
+library("DESeq2")
+library("Biobase")
+library("ggplot2")
+library("data.table")
+library("pheatmap")
+library("dplyr")
+library("tibble")
+library("vegan")
+
+working_directory = "/Users/starr/Documents/papers/rna_virus/R work/Euk Viruses/"
+setwd(working_directory)
+
+```
+
+  #########
+  ### Import data
+  #########
+
+```{r}
+
+infile = "Reads_coverage_Euk_Viruses_fromwheeltree-Narna.txt"
+mtx_counts_N = read.table(infile, header = TRUE, row.names = 1,  sep="\t")
+
+mtx_matrix_N = as.matrix(sapply(mtx_counts_N, as.integer)) 
+rownames(mtx_matrix_N) = rownames(mtx_counts_N)
+mtx_matrix_N[is.na(mtx_matrix_N)] = 0
+mtx_matrix_N = mtx_matrix_N[,order(colnames(mtx_matrix_N))]
+
+designfile = "mtx_design_ecofun_genomes4.txt" 
+mtx_design = read.delim(designfile, header = TRUE, row.names = 1)
+mtx_design <- mtx_design[!(rownames(mtx_design) %in% c("H3_Rhizo_39")),] # Remove H3_Rhizo_39 because these columns are mostly 0s, was messing up the geometric mean 
+# Keeping "H2_BulkLitter_50" for now
+design_rownames = rownames(mtx_design)
+```
+
+  #########
+  ### Create dataset
+  #########  
+
+```{r}
+dds = DESeqDataSetFromMatrix(countData = mtx_matrix_N, colData = mtx_design, design = ~ microcosm)
+dds = dds[ rowSums(counts(dds)) > 5, ] # Filter out rows with < 5 counts
+  
+### Create custom groups
+dds$group = factor(paste0(dds$treatment, dds$location))
+dds$group_harvest = factor(paste0(dds$group, dds$harvest))
+dds$group_harvest_location = factor(paste0(dds$harvest, dds$location))
+dds$group_harvest_treatment = factor(paste0(dds$harvest, dds$treatment))
+dds$group_htl = factor(paste0(dds$harvest, dds$treatment, dds$location))
+  #dds$microcosm <- droplevels(dds$microcosm)
+  
+### Analyze results
+design(dds) = ~ group_htl
+dds = DESeq(dds)
+res = results(dds)
+resultsNames(dds)
+
+dds_counts = counts(dds, normalized=TRUE)
+write.table(dds_counts, file = paste(working_directory,"/DESeq_normalized_euk_virus-Narna.txt", sep = ""))
+saveRDS(dds, file = paste(working_directory,"/dds_htl_euk_virus-Narna.rds", sep = ""))
+```
+
+
+Make a quick PCA in QIIME
+
+```{bash}
+source /macqiime/configs/bash_profile.txt
+
+# Formated text file in Excel before converting to biom (made tab delimited, added #OTU_ID to first header)
+biom convert -i  DESeq_normalized_euk_virus-narna.biom  -o DESeq_normalized_euk_virus_qiime-narna.txt --to-json --table-type="OTU table"
+
+beta_diversity_through_plots.py -i DESeq_normalized_euk_virus_qiime-narna.biom -o beta_diversity_euk_virus-Narna -m mapping_mtx_design_ecofun_genomes4.txt -p parameter.txt -f
+
+```
+
+###### 1. metaMDS to create ordination object
+
+Run Adonis (PERMANOVA)
+
+```{r}
+library("vegan")
+
+# The dds_dist was created by QIIME
+  dds_bray_dm_N = read.delim("beta_diversity_euk_virus-narna/bray_curtis_dm.txt",header = TRUE, row.names = 1)
+dds_dist_N = as.dist(dds_bray_dm_N)
+
+dds_metaMDS_N<-metaMDS(dds_dist_N, distance = "bray", k = 2, trymax = 1000, autotransform =FALSE, noshare = 0.1, wascores = TRUE, expand = TRUE, trace = 1, plot = TRUE)
+
+adonis(dds_dist_N ~ location * treatment * harvest, data = mtx_design, strata = mtx_design$harvest, permutations = 10000)
+
+```
+Call:
+adonis(formula = dds_dist_N ~ location * treatment * harvest, data = mtx_design,      permutations = 10000, strata = mtx_design$harvest) 
+
+Blocks:  strata 
+Permutation: free
+Number of permutations: 10000
+
+Terms added sequentially (first to last)
+
+                           Df SumsOfSqs MeanSqs F.Model      R2    Pr(>F)    
+location                    1    0.1719 0.17187  1.3497 0.02488   0.07349 .  
+treatment                   1    0.5387 0.53865  4.2299 0.07799 9.999e-05 ***
+harvest                     3    0.7126 0.23755  1.8654 0.10318   0.00040 ***
+location:treatment          1    0.1560 0.15605  1.2254 0.02259   0.15028    
+location:harvest            3    0.4812 0.16040  1.2596 0.06967   0.06669 .  
+treatment:harvest           3    0.5164 0.17214  1.3517 0.07477   0.02410 *  
+location:treatment:harvest  3    0.3825 0.12750  1.0013 0.05538   0.48155    
+Residuals                  31    3.9476 0.12734         0.57154              
+Total                      46    6.9070                 1.00000              
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+
+
+
+Use DESEQ2 to compare abundances of viruses in each sample to BULK (no litter)
+
+```{r}
+#dds = readRDS(file = paste(working_directory,"/dds_htl_euk_virus.rds", sep = ""))
+
+res = results(dds)
+resultsNames(dds)
+
+res = results(dds, contrast = c("group_htl", "H1NoLitterBulk", "H1LitterRhizo"))
+comparison = "H1NoLitterBulk_vs_H1LitterRhizo"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(res$baseMean)
+betas_df = data.frame(res$log2FoldChange)
+stat_df = data.frame(res$stat)
+padj_df = data.frame(res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res = results(dds, contrast = c("group_htl", "H1NoLitterBulk", "H1LitterBulk"))
+comparison = "H1NoLitterBulk_vs_H1LitterBulk"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(baseMean_df, res$baseMean)
+betas_df = data.frame(betas_df, res$log2FoldChange)
+stat_df = data.frame(stat_df, res$stat)
+padj_df = data.frame(padj_df, res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res = results(dds, contrast = c("group_htl", "H1NoLitterBulk", "H1NoLitterRhizo"))
+comparison = "H1NoLitterBulk_vs_H1NoLitterRhizo"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(baseMean_df, res$baseMean)
+betas_df = data.frame(betas_df, res$log2FoldChange)
+stat_df = data.frame(stat_df, res$stat)
+padj_df = data.frame(padj_df, res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res = results(dds, contrast = c("group_htl", "H2NoLitterBulk", "H2LitterRhizo"))
+comparison = "H2NoLitterBulk_vs_H2LitterRhizo"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(baseMean_df, res$baseMean)
+betas_df = data.frame(betas_df, res$log2FoldChange)
+stat_df = data.frame(stat_df, res$stat)
+padj_df = data.frame(padj_df, res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res = results(dds, contrast = c("group_htl", "H2NoLitterBulk", "H2LitterBulk"))
+comparison = "H2NoLitterBulk_vs_H2LitterBulk"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(baseMean_df, res$baseMean)
+betas_df = data.frame(betas_df, res$log2FoldChange)
+stat_df = data.frame(stat_df, res$stat)
+padj_df = data.frame(padj_df, res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res = results(dds, contrast = c("group_htl", "H2NoLitterBulk", "H2NoLitterRhizo"))
+comparison = "H2NoLitterBulk_vs_H2NoLitterRhizo"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(baseMean_df, res$baseMean)
+betas_df = data.frame(betas_df, res$log2FoldChange)
+stat_df = data.frame(stat_df, res$stat)
+padj_df = data.frame(padj_df, res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res = results(dds, contrast = c("group_htl", "H3NoLitterBulk", "H3LitterRhizo"))
+comparison = "H3NoLitterBulk_vs_H3LitterRhizo"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(baseMean_df, res$baseMean)
+betas_df = data.frame(betas_df, res$log2FoldChange)
+stat_df = data.frame(stat_df, res$stat)
+padj_df = data.frame(padj_df, res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res = results(dds, contrast = c("group_htl", "H3NoLitterBulk", "H3LitterBulk"))
+comparison = "H3NoLitterBulk_vs_H3LitterBulk"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(baseMean_df, res$baseMean)
+betas_df = data.frame(betas_df, res$log2FoldChange)
+stat_df = data.frame(stat_df, res$stat)
+padj_df = data.frame(padj_df, res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res = results(dds, contrast = c("group_htl", "H3NoLitterBulk", "H3NoLitterRhizo"))
+comparison = "H3NoLitterBulk_vs_H3NoLitterRhizo"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(baseMean_df, res$baseMean)
+betas_df = data.frame(betas_df, res$log2FoldChange)
+stat_df = data.frame(stat_df, res$stat)
+padj_df = data.frame(padj_df, res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res = results(dds, contrast = c("group_htl", "H4NoLitterBulk", "H4LitterRhizo"))
+comparison = "H4NoLitterBulk_vs_H4LitterRhizo"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(baseMean_df, res$baseMean)
+betas_df = data.frame(betas_df, res$log2FoldChange)
+stat_df = data.frame(stat_df, res$stat)
+padj_df = data.frame(padj_df, res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res = results(dds, contrast = c("group_htl", "H4NoLitterBulk", "H4LitterBulk"))
+comparison = "H4NoLitterBulk_vs_H4LitterBulk"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(baseMean_df, res$baseMean)
+betas_df = data.frame(betas_df, res$log2FoldChange)
+stat_df = data.frame(stat_df, res$stat)
+padj_df = data.frame(padj_df, res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res = results(dds, contrast = c("group_htl", "H4NoLitterBulk", "H4NoLitterRhizo"))
+comparison = "H4NoLitterBulk_vs_H4NoLitterRhizo"
+res_sig = which(res$padj < 0.05)
+length(res_sig)
+baseMean_df = data.frame(baseMean_df, res$baseMean)
+betas_df = data.frame(betas_df, res$log2FoldChange)
+stat_df = data.frame(stat_df, res$stat)
+padj_df = data.frame(padj_df, res$padj)
+setnames(baseMean_df, "res.baseMean", paste0("baseMean_", comparison))
+setnames(betas_df, "res.log2FoldChange", paste0("betas_", comparison))
+setnames(stat_df, "res.stat",paste0("stat_", comparison))
+setnames(padj_df, "res.padj", paste0("padj_", comparison))
+
+res_all_data_bulkcomp = data.frame(betas_df, stat_df, padj_df)
+rownames(res_all_data_bulkcomp) = rownames(res)
+saveRDS(res_all_data_bulkcomp, file = paste(working_directory,"/res_euk_virus_bulkcomp.rds", sep = ""))
+
+# Only keep p values where the comparison by Wald test was significantly different
+padj_matrix = as.matrix(res_all_data_bulkcomp[,25:36]) # This is essentially padj_df, but only saved res_all_data, so working from that
+padj_matrix[is.na(padj_matrix)] = 1 # Change NA to 1 so will get filtered out in next step
+padj_matrix[which(padj_matrix > 0.05)] = NA # Convert all p values > 0.05 to NA
+res_all_data_bulkcomp_sig = data.frame(res_all_data_bulkcomp[,1:24], as.data.frame(padj_matrix)) # Remake res_all_data with only significant p values, all non-significant p values are NA
+
+saveRDS(res_all_data_bulkcomp_sig, file = paste(working_directory,"/res_euk_virus_bulkcomp_sig.rds", sep = ""))
+write.table(res_all_data_bulkcomp_sig, file = paste(working_directory,"/results_htl_sig_bulkcomp_euk_virus_020919.txt", sep = ""), append = FALSE)
+
+```
+
+
+###### Ordination of RNA Euk viruses
+
+```{r}
+###### Add path to the experimental design file
+designfile = "mtx_design_ecofun_genomes4.txt" 
+mtx_design = read.delim(designfile, header = TRUE, row.names = 1)
+mtx_design <- mtx_design[!(rownames(mtx_design) %in% c("H3_Rhizo_39")),] # Remove these because these columns are mostly 0s, was messing up the geometric mean 
+# Keeping "H2_BulkLitter_50" for now
+design_rownames = rownames(mtx_design)
+
+emirge_points = as.data.frame(dds_metaMDS_N$points)
+#emirge_metaMDS = emirge_pc
+#emirge_points = emirge_pc
+#### MAKE SURE SAMPLES ARE IN THE SAME ORDER AS THE POINTS!!!
+
+treatment_column = as.data.frame(mtx_design$loc_treat)
+rownames(treatment_column) = rownames(mtx_design)
+emirge_points_df = merge(emirge_points, treatment_column, by = "row.names")
+
+emirge_points_B = emirge_points_df[emirge_points_df[,4]=="Bulk_NoLitter",]
+emirge_points_BL = emirge_points_df[emirge_points_df[,4]=="Bulk_Litter",]
+emirge_points_R = emirge_points_df[emirge_points_df[,4]=="Rhizo_NoLitter",]
+emirge_points_RL = emirge_points_df[emirge_points_df[,4]=="Rhizo_Litter",]
+
+emirge_points_B_m = as.matrix(emirge_points_B[,2:3])
+emirge_points_BL_m = as.matrix(emirge_points_BL[,2:3])
+emirge_points_R_m = as.matrix(emirge_points_R[,2:3])
+emirge_points_RL_m = as.matrix(emirge_points_RL[,2:3])
+
+# Make a PCA!
+
+###### Update file name for PDF
+pdf(file = paste(working_directory,"/PCA_euk_virus-Narna_nohull_coolcolor.pdf", sep = ""), height=5, width=5,useDingbats=FALSE)
+plot(dds_metaMDS_N, display = c("sites"), choices = c(1, 2), type = "p", xlab = " ", ylab = " ")
+
+###### Choose point shape and color
+points(emirge_points_BL_m, pch = 21, cex = 1, col="brown", bg = "brown")
+points(emirge_points_RL_m, cex = 1, pch = 22, col="tan3", bg = "tan3")
+points(emirge_points_B_m, pch = 22, cex = 1, col="blue", bg = "blue")
+points(emirge_points_R_m, cex = 1, pch = 21, col="cornflowerblue", bg = "cornflowerblue")
+
+group_factor =  as.factor(emirge_points_df[,4])
+
+#Ellipses around Root vs. Bulk
+#Calculate centroids
+#centroid_B = summary(ordiellipse(dds_metaMDS, groups = group_factor, show.groups = "Bulk_NoLitter", col = "black", lty = 1, lwd = 1, kind = "se", conf = 0.95))
+#centroid_R = summary(ordiellipse(dds_metaMDS, groups = group_factor, show.groups = "Bulk_Litter", col = "black", lty = 1, lwd = 1, kind = "se", conf = 0.95))
+
+#lty 5
+#centroid_BL = summary(ordiellipse(dds_metaMDS, groups = group_factor, show.groups = "Rhizo_NoLitter", col = "black", lty = 5, lwd = 1, kind = "se", conf = 0.95))
+#centroid_RL = summary(ordiellipse(dds_metaMDS, groups = group_factor, show.groups = "Rhizo_Litter", col = "black", lty = 5, lwd = 1, kind = "se", conf =0.95))
+
+###### Create legend
+legend("topleft",legend=c("Rhizo Litter", "Bulk Litter", "Rhizo", "Bulk"),pch= c(22, 21, 21, 22),col= c("tan3", "brown", "cornflowerblue", "blue"), pt.bg = c("tan3", "brown", "cornflowerblue", "blue"), bty = "n")
+
+dev.off()
+```
+
+
+#Treatment
+
+```{r}
+
+harvest_column = as.data.frame(mtx_design$harvest)
+rownames(harvest_column) = rownames(mtx_design)
+emirge_points_df = merge(emirge_points, harvest_column, by = "row.names")
+
+emirge_points_1 = emirge_points_df[emirge_points_df[,4]=="H1",]
+emirge_points_2 = emirge_points_df[emirge_points_df[,4]=="H2",]
+emirge_points_3 = emirge_points_df[emirge_points_df[,4]=="H3",]
+emirge_points_4 = emirge_points_df[emirge_points_df[,4]=="H4",]
+
+emirge_points_1_m = as.matrix(emirge_points_1[,2:3])
+emirge_points_2_m = as.matrix(emirge_points_2[,2:3])
+emirge_points_3_m = as.matrix(emirge_points_3[,2:3])
+emirge_points_4_m = as.matrix(emirge_points_4[,2:3])
+
+# Make a PCA!
+
+###### Update file name for PDF.  You will need to run all code from "pdf" to "dev.off" to generate PDF
+pdf(file = paste(working_directory,"PCA_euk_virus-Narna_nohull_time.pdf", sep = ""), height=5, width=5,useDingbats=FALSE)
+plot(dds_metaMDS_N, display = c("sites"), choices = c(1, 2), type = "p", xlab = " ", ylab = " ")
+
+###### change PCH values here
+points(emirge_points_1_m, pch = 21, cex = 1, col="yellow", bg = "yellow")
+points(emirge_points_2_m, cex = 1, pch = 21, col="brown", bg = "brown")
+points(emirge_points_3_m, pch = 21, cex = 1, col="blue", bg = "blue")
+points(emirge_points_4_m, cex = 1, pch = 21, col="red", bg = "red")
+
+group_factor =  as.factor(emirge_points_df[,3])
+
+#Ellipses around Root vs. Bulk
+#Calculate centroids
+#centroid_B = summary(ordiellipse(dds_metaMDS, groups = group_factor, show.groups = "Bulk_NoLitter", col = "black", lty = 1, lwd = 1, kind = "se", conf = 0.95))
+#centroid_R = summary(ordiellipse(dds_metaMDS, groups = group_factor, show.groups = "Bulk_Litter", col = "black", lty = 1, lwd = 1, kind = "se", conf = 0.95))
+
+#lty 5
+#centroid_BL = summary(ordiellipse(dds_metaMDS, groups = group_factor, show.groups = "Rhizo_NoLitter", col = "black", lty = 5, lwd = 1, kind = "se", conf = 0.95))
+#centroid_RL = summary(ordiellipse(dds_metaMDS, groups = group_factor, show.groups = "Rhizo_Litter", col = "black", lty = 5, lwd = 1, kind = "se", conf =0.95))
+
+###### Update pch values for the legend
+legend("bottomleft",legend=c("1", "2", "3", "4"),pch= c(21, 22, 21, 22),col= c("yellow", "brown", "blue", "red"), bg = c("yellow", "brown", "blue", "red"), bty = "n")
+
+dev.off()
+```
